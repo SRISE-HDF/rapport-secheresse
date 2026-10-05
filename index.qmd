@@ -1,0 +1,884 @@
+---
+title: "Sécheresse des sols et des précipitations — `r params$annee`"
+subtitle: "SSWI et SPI sur `r params$echelle` mois, par région et département"
+author: "DRAAF Hauts-de-France — SRISE de Lille"
+date: today
+date-format: "D MMMM YYYY"
+lang: fr
+language:
+  title-block-author-single: "Auteur"
+bibliography: references.bib
+csl: bibliographie.csl
+
+format:
+  html:
+    title-block-banner: "#1d3f5e"
+    title-block-banner-color: "white"
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    toc-title: "Régions"
+    embed-resources: true
+    theme: [cosmo, styles.scss]
+    smooth-scroll: true
+    anchor-sections: false
+    fig-width: 9
+    fig-height: 7.5
+    fig-dpi: 96
+params:
+  annee: 2026
+  indicateurs: "SSWI,SPI"   # "SSWI", "SPI" ou "SSWI,SPI"
+  echelle: 3                # 1, 3, 6 ou 12
+  mois: "dernier"           # "dernier" ou "2026-08"
+  regions: "toutes"         # "toutes", ou codes / noms séparés par des virgules : "32", "32,11"
+  
+  rendu: "interpole"      # "mailles" (carrés 8 km), "communes", "interpole" = interpolation
+  interpolation: "bilineaire"  # si rendu = "interpole" : "bilineaire" (défaut conseillé), "cubique" ou "proche"
+  resolution_m: 1000            # résolution de la grille interpolée, en mètres (1 km par défaut)
+  
+  logo: "logo.png"          # image affichée sous le titre (ignorée pour l'instant)
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+# Rendu des images de meilleure qualité si le package ragg est installé
+if (requireNamespace("ragg", quietly = TRUE)) knitr::opts_chunk$set(dev = "ragg_png")
+# Fonctions de cartographie et de légende (et les packages qu'elles utilisent)
+source("fonctions_cartes.R")
+```
+
+```{r}
+#| label: fonctions
+# =============================================================================
+# Fonctions du rapport
+#   preparer()          : lit les données et prépare tout ce qu'il faut
+#   emettre_entete()    : logo et rappel des sources
+#   emettre_bandeau()   : tuiles de synthèse
+#   emettre_sommaire()  : encadrés région -> départements
+#   emettre_france()    : cartes de France (un onglet par indicateur)
+#   emettre_region()    : section complète d'une région
+#   emettre_echelles()  : frise des indices à toutes les échelles (1, 3, 6, 12 mois)
+#   emettre_croisee()   : lecture croisée SSWI x SPI (carte à quatre situations + tableau)
+#   emettre_persistance() : nombre de mois consécutifs en situation sèche, par maille
+#   note_cartes(), note_bilan(), note_evolution() : notes de lecture dépliables,
+#                         placées sous l'élément qu'elles expliquent
+# =============================================================================
+# -----------------------------------------------------------------------------
+# POUR SE REPÉRER
+# - Ce bloc ne produit rien tout seul, il définit des fonctions, que les
+#   blocs suivants du document appellent une par une.
+# - preparer() fait tous les calculs et renvoie une grande liste, appelée R
+#   dans la suite. Les fonctions emettre_...() reçoivent cette liste R et
+#   écrivent un morceau de la page (texte, tableau, carte).
+# - « Écrire dans la page » se fait avec cat() : le texte affiché est du
+#   markdown ou du HTML que Quarto intègre au rapport (chunks en results: asis).
+# - R$xxx = l'élément xxx de la liste R; |> = « puis » (enchaîne les étapes);
+#   sprintf("%s %d %.2f", ...) = texte à trous (%s texte, %d entier, %.2f deux
+#   décimales; %% = le caractère % lui-même).
+# - Les fonctions de cartes et de légende (classer, carte_region, legende_mf…)
+#   sont dans fonctions_cartes.R, chargé dans le bloc « setup » ci-dessus.
+# -----------------------------------------------------------------------------
+
+# --- Préparation ----------------------------------------------------------------------------
+
+# preparer() : lit les données et calcule tout ce dont le rapport a besoin.
+#   annee         : année des données (fichier data/sim_mensuel_<annee>.rds, produit par le script 01)
+#   indicateurs   : "SSWI", "SPI" ou "SSWI,SPI"
+#   echelle       : durée des indices en mois (1, 3, 6 ou 12)
+#   mois          : "dernier" (dernier mois disponible) ou un mois précis, ex. "2026-08"
+#   regions_choix : "toutes" ou une sélection de régions
+#   rendu         : style des cartes ("communes", "interpole", ou autre = mailles brutes)
+#   interpolation : rendu "interpole" : "bilineaire" (défaut conseillé), "cubique" ou "proche"
+#   resolution_m  : résolution de la grille d’affichage interpolée, en mètres
+#   dossier       : dossier des données
+preparer <- function(annee, indicateurs = "SSWI,SPI", echelle = 3, mois = "dernier",
+                     regions_choix = "toutes", rendu = "communes",
+                     interpolation = "bilineaire", resolution_m = 1000,
+                     dossier = "data") {
+  # "sswi, spi" -> c("SSWI", "SPI") : on découpe aux virgules, on nettoie, on met en majuscules
+  indics <- toupper(trimws(unlist(strsplit(indicateurs, ","))))
+  if (!all(indics %in% c("SSWI", "SPI"))) stop("indicateurs : valeurs admises SSWI et SPI")
+
+  # Données mensuelles par maille (une ligne = une maille x un mois)
+  sim <- readRDS(file.path(dossier, sprintf("sim_mensuel_%d.rds", annee)))
+  # La suite de preparer() utilise la syntaxe data.table : get(), .(), with = FALSE, setorder()…
+  # On garantit donc que l'objet lu est bien un data.table, même si le RDS contient un data.frame.
+  data.table::setDT(sim)
+
+  # Nom de la colonne de chaque indicateur à l'échelle choisie, ex. SSWI -> "SSWI_3"
+  cols <- setNames(paste0(indics, "_", echelle), indics)
+
+  # Sécurité : on s'arrête avec un message clair si ces colonnes n'existent pas
+  manquantes <- setdiff(cols, names(sim))
+  if (length(manquantes)) stop("Colonnes absentes : ", paste(manquantes, collapse = ", "))
+
+  # Mois cartographié : le plus récent pour lequel l'indice est renseigné, ou celui demandé
+  mois_sel <- if (mois == "dernier") sim[!is.na(get(cols[1])), max(mois)] else mois
+  # Contours administratifs (régions, départements) et régions à traiter
+  admin      <- charger_admin(dossier)
+  regions_fr <- admin$regions
+  regions    <- selectionner_regions(regions_fr, regions_choix)
+  deps       <- admin$deps
+  # Mailles transformées en objets géographiques, chacune rattachée à son département.
+  # rattacher() écarte au passage les mailles entièrement hors de France (environ 900 sur
+  # 9 892) : tout ce qui suit (moyennes, parts, bilan, cartes) ne porte que sur les autres.
+  mailles    <- mailles_sf(sim) |> rattacher(deps)
+
+  # Prépare tout ce qui concerne UN indicateur (appelée une fois pour SSWI, une fois pour SPI)
+  prep_ind <- function(ind) {
+    col <- cols[[ind]]
+    # Valeurs du mois cartographié, avec leur classe de sécheresse (légende Météo-France)
+    val <- sim[mois == mois_sel & !is.na(get(col)),
+               .(LAMBX, LAMBY, valeur = get(col), classe = classer(get(col)))]
+    # mv = « mailles + valeurs » : la couche géographique qui sert aux cartes
+    mv  <- mailles |> inner_join(val, by = c("LAMBX", "LAMBY"))
+    # sd = séries départementales : pour chaque département et chaque mois,
+    #      moyenne des mailles (sert aux courbes et aux classements)
+    sd  <- mailles |> st_drop_geometry() |>
+      inner_join(sim[!is.na(get(col)), .(LAMBX, LAMBY, mois, valeur = get(col))], by = c("LAMBX", "LAMBY")) |>
+      group_by(code_reg, code_dep, nom_dep, mois) |>
+      summarise(valeur = mean(valeur), n_mailles = n(), .groups = "drop") |>
+      mutate(date = as.Date(paste0(mois, "-01")), classe = classer(valeur), indic = ind)
+    # sr = séries régionales : moyenne des départements pondérée par leur nombre de mailles
+    #      (équivaut à la moyenne de toutes les mailles de la région)
+    sr  <- sd |> group_by(code_reg, mois, date) |>
+      summarise(valeur = weighted.mean(valeur, n_mailles), .groups = "drop") |>
+      mutate(classe = classer(valeur), indic = ind)
+    # Ce que la fonction renvoie; reg_mois = valeur de chaque région pour le mois cartographié,
+    # parts_fr = part (%) des mailles de France dans chaque classe
+    list(mv = mv, series_dep = sd, series_reg = sr,
+         reg_mois = sr |> filter(mois == mois_sel) |> left_join(st_drop_geometry(regions_fr), by = "code_reg"),
+         parts_fr = prop.table(table(mv$classe)) * 100)
+  }
+  # D = résultats par indicateur : D$SSWI, D$SPI
+  D <- setNames(lapply(indics, prep_ind), indics)
+
+  # Toutes les échelles disponibles (1, 3, 6, 12 mois…) pour le mois cartographié :
+  # sert à la frise « Échelles » de chaque région. Une table longue par indicateur :
+  # une ligne = une maille x une échelle, avec sa valeur et sa classe.
+  echelles_dispo <- sort(as.integer(sub("^SSWI_", "", grep("^SSWI_[0-9]+$", names(sim), value = TRUE))))
+  E <- setNames(lapply(indics, function(ind) {
+    cols_e <- paste0(ind, "_", echelles_dispo)
+    long <- melt(sim[mois == mois_sel, c("LAMBX", "LAMBY", cols_e), with = FALSE],
+                 id.vars = c("LAMBX", "LAMBY"), variable.name = "col", value.name = "valeur")
+    long[, echelle := as.integer(sub(".*_", "", col))][, col := NULL]
+    long <- long[!is.na(valeur)][, classe := classer(valeur)]
+    mailles |> inner_join(as.data.frame(long), by = c("LAMBX", "LAMBY"))
+  }), indics)
+
+  # Persistance : pour chaque maille, nombre de mois CONSÉCUTIFS, en remontant depuis le
+  # mois cartographié, où l'indice est sous le seuil « plus sec que la normale » (-0,84).
+  # Le compte s'arrête au premier mois non sec, ou au début du fichier (janvier) :
+  # une maille sèche depuis janvier est donc notée « depuis le début de l'année ».
+  seuil_sec <- legende_mf$breaks[4]
+  P <- setNames(lapply(indics, function(ind) {
+    col <- cols[[ind]]
+    s <- sim[mois <= mois_sel & !is.na(get(col)), .(LAMBX, LAMBY, mois, sec = get(col) < seuil_sec)]
+    setorder(s, LAMBX, LAMBY, -mois)                    # du mois cartographié vers janvier
+    s[, n_mois := { r <- rle(sec); if (r$values[1]) r$lengths[1] else 0L }, by = .(LAMBX, LAMBY)]
+    s[, depuis_debut := n_mois == .N, by = .(LAMBX, LAMBY)]   # sec sur TOUS les mois disponibles
+    mailles |> inner_join(as.data.frame(unique(s[, .(LAMBX, LAMBY, n_mois, depuis_debut)])), by = c("LAMBX", "LAMBY"))
+  }), indics)
+
+  # Fond de carte selon le rendu choisi : valeurs rabattues sur les communes,
+  # champ interpolé, ou rien (NULL = mailles brutes)
+  communes <- if (rendu == "communes") charger_communes(dossier, regions) else NULL
+  fonds <- setNames(lapply(indics, function(ind) switch(rendu,
+    communes = rabattre_communes(communes, D[[ind]]$mv),
+    interpole = champ_interpole(
+      D[[ind]]$mv,
+      resolution_m = resolution_m,
+      interpolation = interpolation
+    ),
+    NULL)), indics)
+
+  # Bilan hydrique de la fenêtre, avec normales si disponibles
+  # Les mois de la fenêtre, en remontant depuis le mois cartographié (ex. août, juillet, juin)
+  mois_fenetre <- format(seq(as.Date(paste0(mois_sel, "-01")), by = "-1 month", length.out = echelle), "%Y-%m")
+  # Variables du bilan hydrique réellement présentes dans le fichier
+  vars_bilan <- intersect(c("PRECIP", "ETP", "EVAP", "PE", "SWI", "T"), names(sim))
+  # Normales 1991-2020 (script 00) : facultatives, NULL si le fichier n'existe pas
+  fn <- file.path(dossier, "normales_1991_2020.rds")
+  normales <- if (file.exists(fn)) readRDS(fn) else NULL
+  bilan_dep <- if (length(vars_bilan) >= 2) {
+    # Lignes des mois de la fenêtre, colonnes utiles seulement
+    d_bilan <- sim[mois %in% mois_fenetre, c("LAMBX", "LAMBY", "mois", vars_bilan), with = FALSE]
+    # Ajout des normales du même mois calendaire (colonnes N_PRECIP, N_ETP…) à chaque ligne
+    if (!is.null(normales)) {
+      d_bilan[, mois_num := as.integer(substr(mois, 6, 7))]
+      d_bilan <- normales[d_bilan, on = .(LAMBX, LAMBY, mois_num)]
+    }
+    # Deux familles : les cumuls (on ADDITIONNE les mois) et les niveaux (on fait la MOYENNE)
+    vars_som <- intersect(c("PRECIP", "ETP", "EVAP", "PE"), vars_bilan)
+    vars_moy <- intersect(c("SWI", "T"), vars_bilan)
+    # Par département : somme de toutes les lignes (mailles x mois) puis division par le
+    # nombre de mailles = cumul moyen par maille sur la période; moyenne simple pour SWI et T
+    mailles |> st_drop_geometry() |>
+      inner_join(d_bilan, by = c("LAMBX", "LAMBY")) |>
+      group_by(code_reg, code_dep, nom_dep) |>
+      summarise(n_m = n_distinct(LAMBX * 1e6 + LAMBY),
+                across(any_of(c(vars_som, paste0("N_", vars_som))), ~ sum(.x, na.rm = TRUE)),
+                across(any_of(c(vars_moy, paste0("N_", vars_moy))), ~ mean(.x, na.rm = TRUE)),
+                .groups = "drop") |>
+      mutate(across(any_of(c(vars_som, paste0("N_", vars_som))), ~ .x / n_m)) |>
+      select(-n_m)
+  } else NULL
+
+  # Tout est rangé dans une seule liste (appelée R par les fonctions suivantes).
+  # date_donnees = dernier jour du mois cartographié; sous_titre = petite fonction
+  # qui fabrique le sous-titre des cartes; a_normales = TRUE si les normales existent
+  list(annee = annee, indics = indics, echelle = echelle, mois_sel = mois_sel,
+       mois_lib = libelle_mois(mois_sel), fenetre = fenetre_mois(mois_sel, echelle),
+       date_donnees = format(seq(as.Date(paste0(mois_sel, "-01")), by = "1 month", length.out = 2)[2] - 1, "%d %B %Y"),
+       sous_titre = function(ind) sprintf("%s sur %d mois : %s (référence 1991-2020)", ind, echelle, fenetre_mois(mois_sel, echelle)),
+       regions_fr = regions_fr, regions = regions, deps = deps, mailles = mailles,
+       D = D, E = E, P = P, seuil_sec = seuil_sec, echelles_dispo = echelles_dispo, fonds = fonds, rendu = rendu, interpolation = interpolation, resolution_m = resolution_m, bilan_dep = bilan_dep, a_normales = !is.null(normales))
+}
+
+# --- Vocabulaire ------------------------------------------------------------------------------
+
+# « sec » est le mot de la légende Météo-France, commun aux deux indices : il qualifie une
+# situation statistique (écart rare à la normale). Quand un texte est propre à un indice,
+# on précise de quoi il s'agit : des sols pour le SSWI, de la pluie pour le SPI.
+lib_sec <- function(ind, forme = c("etat", "classement", "part")) {
+  forme <- match.arg(forme)
+  if (ind == "SSWI") switch(forme,
+    etat       = "sols secs",
+    classement = "du sol le plus sec au moins sec",
+    part       = "sols secs")
+  else switch(forme,
+    etat       = "pluie déficitaire",
+    classement = "du plus déficitaire en pluie au moins déficitaire",
+    part       = "en déficit de pluie")
+}
+
+# --- Utilitaires HTML -----------------------------------------------------------------------
+
+# html_brut() : écrit du HTML dans la page, entouré des balises qui disent à Quarto
+#               « ceci est du HTML, à recopier tel quel »
+html_brut <- function(...) cat("\n```{=html}\n", ..., "\n```\n\n", sep = "")
+# col_cls() : couleur associée à une classe de sécheresse (celle de la légende)
+col_cls   <- function(cls) unname(legende_mf$couleurs[match(as.character(cls), legende_mf$labels)])
+# badge() : étiquette colorée portant le nom de la classe; texte blanc sur les couleurs
+#           foncées (classes extrêmes), sombre sinon; ajoute « (à la limite) » quand la
+#           valeur est tout près d'un seuil
+badge <- function(cls, valeur = NULL) {
+  i <- match(as.character(cls), legende_mf$labels)
+  col <- unname(legende_mf$couleurs[i])
+  texte <- ifelse(i %in% c(1, 2, 6, 7), "#fff", "#333")
+  limite <- if (is.null(valeur)) rep(FALSE, length(cls)) else cas_limite(valeur)
+  ifelse(is.na(i), "",
+         sprintf('<span class="badge rounded-pill" style="background:%s;color:%s;font-weight:600">%s</span>%s',
+                 col, texte, as.character(cls),
+                 ifelse(limite, ' <span class="small text-secondary" title="Moyenne à moins de 0,05 d\'un seuil">(à la limite)</span>', "")))
+}
+# tuile() : une case du bandeau de synthèse (petit titre, grand chiffre, détail, bord coloré)
+tuile <- function(label, valeur, detail, col_bord = "#dee2e6") {
+  sprintf('<div class="col"><div class="card h-100 shadow-sm" style="border-left:5px solid %s">
+  <div class="card-body py-3">
+    <div class="text-muted text-uppercase small" style="letter-spacing:.05em">%s</div>
+    <div class="fs-3 fw-semibold lh-1 my-1">%s</div>
+    <div class="small text-secondary">%s</div>
+  </div></div></div>', col_bord, label, valeur, detail)
+}
+
+# Ligne de répartition des mailles par classe, sous une carte :
+# "<libellé> — <indice> : moyenne x,xx [classe] · 17 % exceptionnellement sec · … · N mailles"
+ligne_parts <- function(mv, libelle, ind) {
+  p <- prop.table(table(mv$classe)) * 100
+  p <- p[p > 0]                                          # classes présentes seulement
+  p <- p[order(match(names(p), legende_mf$labels))]      # du plus sec au plus humide
+  moy <- mean(mv$valeur)
+  # Une pastille par classe : fond = couleur de la classe, texte blanc sur les
+  # couleurs foncées (classes extrêmes), sombre sinon
+  i <- match(names(p), legende_mf$labels)
+  pastilles <- sprintf(
+    '<span class="badge rounded-pill" style="background:%s;color:%s;font-weight:500">%.0f&nbsp;%% %s</span>',
+    unname(legende_mf$couleurs[i]), ifelse(i %in% c(1, 2, 6, 7), "#fff", "#333"),
+    as.numeric(p), tolower(names(p)))
+  sprintf('<p class="small text-secondary mb-2"><strong>%s — %s :</strong> moyenne %.2f %s &nbsp; %s &nbsp;· %d mailles</p>',
+          libelle, ind, moy, badge(classer(moy), moy), paste(pastilles, collapse = " "), nrow(mv))
+}
+
+# --- Blocs --------------------------------------------------------------------------------------
+
+# En-tête : pas encore de logo (au cas où) + rappel de la source, de la période et de la date de génération
+emettre_entete <- function(R, logo = "logo.png") {
+  logo_html <- if (nzchar(logo) && file.exists(logo)) sprintf('<img src="%s" alt="" style="height:56px;margin-right:18px">', logo) else ""
+  html_brut(sprintf('
+<div class="d-flex align-items-center flex-wrap gap-2 mt-3 mb-2">%s
+  <div class="small text-secondary">
+    <div><strong>Données Météo-France</strong> (modèle SIM2, jeu « SIM mensuelle », meteo.data.gouv.fr) arrêtées au <strong>%s</strong>.</div>
+    <div>Indices sur %d mois (%s) · classes par durée de retour, référence 1991-2020 · rapport généré le %s.</div>
+    <div class="fst-italic mt-1" style="max-width:60em">SIM2 est le modèle de Météo-France qui calcule chaque jour, sur des carrés de 8 km, l\'eau contenue dans le sol à partir de la pluie, de la température et de l\'évaporation. Les classes indiquent la rareté de la situation : « plus sec que la normale » revient en moyenne une année sur cinq, « inhabituellement sec » une année sur dix, « exceptionnellement sec » une année sur vingt-cinq, par comparaison avec les années 1991 à 2020.</div>
+  </div></div>', logo_html, R$date_donnees, R$echelle, R$fenetre, format(Sys.Date(), "%d %B %Y")))
+}
+
+# Bandeau de synthèse : une tuile « période », puis pour chaque indicateur
+# la moyenne nationale et la région la plus sèche
+emettre_bandeau <- function(R) {
+  tuiles <- tuile("Période cartographiée", R$fenetre, sprintf("indices sur %d mois, arrêtés fin %s", R$echelle, R$mois_lib))
+  for (ind in R$indics) {
+    # Moyenne de toutes les mailles de France et région ayant la valeur la plus basse
+    d <- R$D[[ind]]; moy <- mean(d$mv$valeur, na.rm = TRUE)
+    rmin <- d$reg_mois |> slice_min(valeur, n = 1)
+    tuiles <- c(tuiles,
+      tuile(paste(ind, "— moyenne France"), sprintf("%.2f", moy),
+            sprintf("%s · %.0f&nbsp;%% des mailles en situation sèche (classes sèches de la légende)", badge(classer(moy)),
+                    sum(d$parts_fr[legende_mf$labels[1:3]], na.rm = TRUE)), col_cls(classer(moy))),
+      tuile(paste(ind, "— région la plus sèche de France"), sprintf("%.2f", rmin$valeur),
+            sprintf("%s %s", rmin$nom_reg, badge(rmin$classe)), col_cls(rmin$classe)))
+  }
+  # Les tuiles sont placées dans une grille qui s'adapte à la largeur de l'écran
+  html_brut('<div class="row row-cols-1 row-cols-md-3 row-cols-xl-5 g-3 my-3">\n', paste(tuiles, collapse = "\n"), '\n</div>')
+}
+
+# Sommaire : une carte (au sens « encadré ») par région, avec ses valeurs, sa classe
+# et des liens cliquables vers chacun de ses départements. Les liens pointent vers les
+# ancres posées par emettre_region() : #reg-32 pour une région, #dep-59 pour un département.
+emettre_sommaire <- function(R) {
+  cartes_html <- character(0)
+  for (i in seq_len(nrow(R$regions))) {
+    # La région n° i et ses départements, par ordre alphabétique
+    r  <- R$regions[i, ]
+    dr <- R$deps |> filter(code_reg == r$code_reg) |> arrange(nom_dep)
+    # Une ligne de texte par indicateur : valeur régionale + badge de classe
+    lignes <- sapply(R$indics, function(ind) {
+      rv <- R$D[[ind]]$reg_mois |> filter(code_reg == r$code_reg)
+      sprintf('<div class="small text-secondary">%s %.2f &nbsp; %s</div>', ind, rv$valeur, badge(rv$classe, rv$valeur))
+    })
+    # La couleur du bord de l'encadré suit la classe du premier indicateur
+    cls1  <- R$D[[R$indics[1]]]$reg_mois |> filter(code_reg == r$code_reg) |> pull(classe)
+    # « Pastilles » cliquables : un lien par département
+    pills <- paste(sprintf('<a class="badge rounded-pill text-bg-light border text-decoration-none fw-normal" href="%s">%s</a>',
+                           paste0("#dep-", dr$code_dep), dr$nom_dep), collapse = " ")
+    # Assemblage de l'encadré de la région, ajouté à la liste
+    cartes_html <- c(cartes_html, sprintf('<div class="col"><div class="card h-100 shadow-sm" style="border-left:6px solid %s">
+  <div class="card-body py-3">
+    <div class="fs-5 fw-semibold mb-1"><a href="%s" class="text-decoration-none text-reset">%s</a></div>
+    %s
+    <div class="d-flex flex-wrap gap-1 mt-2">%s</div>
+  </div></div></div>', col_cls(cls1), paste0("#reg-", r$code_reg), r$nom_reg, paste(lignes, collapse = "\n"), pills))
+  }
+  html_brut('<div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-4">\n', paste(cartes_html, collapse = "\n"), '\n</div>')
+}
+
+# Cartes de France : un onglet par indicateur
+emettre_france <- function(R) {
+  cat("::: {.panel-tabset}\n\n")
+  for (ind in R$indics) {
+    cat(sprintf("### %s\n\n", ind))   # titre de l'onglet
+    # Trois couches superposées : mailles colorées par classe, limites des départements, limites des régions
+    g <- ggplot() +
+      geom_sf(data = R$D[[ind]]$mv, aes(fill = classe), colour = NA) +
+      geom_sf(data = R$deps, fill = NA, colour = "grey45", linewidth = 0.2) +
+      geom_sf(data = R$regions_fr, fill = NA, colour = "black", linewidth = 0.5) +
+      echelle_mf() + coord_sf(datum = NA) +
+      labs(title = paste("France hors DROM —", R$fenetre), subtitle = R$sous_titre(ind)) +
+      theme_carte()
+    # Dans une boucle, un graphique ne s'affiche que si on le demande avec print()
+    print(avec_legende(g, 0.16) + patchwork::plot_annotation(caption = source_txt))
+    cat("\n\n")
+  }
+  cat(":::\n\n")
+  note_cartes(R, rendu = "mailles")   # note de lecture dépliable; les cartes de France sont en mailles brutes
+}
+
+# Section complète d'une région : titre, onglets par indicateur, bilan hydrique,
+# onglets par département, lien de retour au sommaire
+emettre_region <- function(R, code_reg) {
+  # La région et ses départements. « !!code_reg » = la valeur reçue en argument
+  # (sans !!, filter() comparerait la colonne code_reg à elle-même)
+  r  <- R$regions_fr |> filter(code_reg == !!code_reg)
+  dr <- R$deps |> filter(code_reg == !!code_reg) |> arrange(nom_dep)
+  # Niveaux de titres markdown : "##" région, "###" indicateur, "####" département
+  n1 <- "##"; n2 <- "###"; n3 <- "####"
+  # Titre de la région, avec son ancre (#reg-32) pour les liens du sommaire
+  cat(sprintf("\n\n%s %s {#reg-%s}\n\n", n1, r$nom_reg, code_reg))
+
+  # Un onglet par indicateur : carte régionale, répartition par classe, classement, détail replié
+  cat("::: {.panel-tabset}\n\n")
+  for (ind in R$indics) {
+    # d = résultats de cet indicateur; mv = ses mailles de la région (avec valeur et classe)
+    d  <- R$D[[ind]]
+    mv <- d$mv |> filter(code_reg == !!code_reg)
+    cat(sprintf("%s %s\n\n", n2, ind))
+    # Carte régionale
+    print(carte_region(mv, r, dr, paste(r$nom_reg, "—", R$fenetre), R$sous_titre(ind),
+                       rendu = R$rendu, fond = R$fonds[[ind]]))
+    cat("\n\n")
+    # Répartition des mailles de la région par classe (ligne sous la carte)
+    html_brut(ligne_parts(mv, r$nom_reg, ind))
+
+    # Valeurs départementales du mois cartographié -> graphique de classement
+    tab <- d$series_dep |> filter(code_reg == !!code_reg, mois == R$mois_sel)
+    print(graphe_departements(tab, paste(r$nom_reg, "—", ind, ": départements classés", lib_sec(ind, "classement")), R$sous_titre(ind)))
+    cat("\n\n")
+    # Part des mailles de chaque département dans chaque classe; on ne garde que les classes présentes
+    parts <- parts_classes(mv)
+    classes_presentes <- legende_mf$labels[legende_mf$labels %in% names(parts) &
+                                           colSums(parts[, intersect(legende_mf$labels, names(parts)), drop = FALSE]) > 0]
+    # Tableau détaillé : du département le plus sec au moins sec
+    tab2 <- tab |> arrange(valeur) |>
+      transmute(code_dep, Département = nom_dep, !!paste(ind, "moyen") := round(valeur, 2),
+                Classe = badge(classe, valeur), Mailles = n_mailles) |>
+      left_join(parts |> select(code_dep, all_of(classes_presentes)), by = "code_dep") |>
+      select(-code_dep)
+    names(tab2)[names(tab2) %in% classes_presentes] <- paste0("% ", classes_presentes)
+    # Le tableau est placé dans un encadré replié (le lecteur clique pour l'ouvrir)
+    cat(sprintf('::: {.callout-note collapse="true" appearance="minimal"}\n## Détail par département — %s : moyenne, classe et part des mailles par classe\n', ind))
+    html_brut(as.character(knitr::kable(tab2, format = "html", escape = FALSE,
+                       align = c("l", "r", "l", "r", rep("r", length(classes_presentes))),
+                       table.attr = 'class="table table-sm"')))
+    note_detail(ind)   # note de lecture dépliable, sous le tableau
+    cat(":::\n\n")
+  }
+  cat(":::\n\n")
+  note_cartes(R)   # note de lecture dépliable, sous les cartes de la région
+
+  emettre_echelles(R, code_reg, r, dr)   # frise 1 / 3 / 6 / 12 mois
+  emettre_croisee(R, code_reg, r, dr)    # lecture croisée SSWI x SPI (si les deux indicateurs sont demandés)
+  emettre_persistance(R, code_reg, r, dr) # depuis combien de mois chaque maille est-elle sèche ?
+
+  # Bilan hydrique (commun)
+  if (!is.null(R$bilan_dep)) {
+    # Lignes de la région; an = TRUE si on dispose des normales
+    b <- R$bilan_dep |> filter(code_reg == !!code_reg) |> arrange(nom_dep)
+    an <- R$a_normales
+    # Deux mises en forme de cellule : pct()  -> « valeur (xx % de la normale) »
+    #                                  diff() -> « valeur (écart à la normale, avec signe) »
+    # Sans normales, la valeur seule. <small> = parenthèse en petits caractères gris
+    pct  <- function(v, n) if (an) sprintf("%.0f <small class=\"text-secondary\">(%.0f&nbsp;%%)</small>", v, 100 * v / n) else sprintf("%.0f", v)
+    diff <- function(v, n, f = "%+.0f") if (an) sprintf(paste0("%.0f <small class=\"text-secondary\">(", f, ")</small>"), v, v - n) else sprintf("%.0f", v)
+    # Construction du tableau : une colonne par grandeur, au format texte
+    tb <- b |> transmute(
+      Département = nom_dep,
+      `Pluie (mm)`              = pct(PRECIP, N_PRECIP),
+      `ETP (mm)`                = pct(ETP, N_ETP),
+      `Évaporation réelle (mm)` = pct(EVAP, N_EVAP),
+      `Pluies efficaces (mm)`   = diff(PE, N_PE),
+      `SWI moyen`               = if (an) sprintf("%.2f <small class=\"text-secondary\">(norm. %.2f)</small>", SWI, N_SWI) else sprintf("%.2f", SWI),
+      `T moyenne (°C)`          = if (an) sprintf("%.1f <small class=\"text-secondary\">(%+.1f)</small>", T, T - N_T) else sprintf("%.1f", T))
+    # Légende au-dessus du tableau, puis le tableau lui-même en HTML
+    cat(sprintf("**Bilan hydrique de la période %s** — cumuls sur la période, moyennes des mailles%s.\n\n", R$fenetre,
+                if (an) "; entre parenthèses, écart à la normale 1991-2020 (% de la normale pour les cumuls, différence pour les pluies efficaces et la température, valeur normale pour le SWI)" else ""))
+    html_brut(as.character(knitr::kable(tb, format = "html", escape = FALSE, align = c("l", rep("r", ncol(tb) - 1)),
+                                        table.attr = 'class="table table-sm"')))
+    note_bilan(R)   # note de lecture dépliable, sous le tableau
+  }
+
+  # Départements : deux cartes côte à côte (une légende), courbe en pleine largeur
+  cat(sprintf("%s Départements {.unnumbered .unlisted}\n\n", n2))
+  cat("Pour chaque département : les cartes, puis l'évolution des indices depuis janvier.\n\n")
+  cat("::: {.panel-tabset}\n\n")
+  # Un onglet par département
+  for (j in seq_len(nrow(dr))) {
+    d_j <- dr[j, ]
+    cat(sprintf("%s %s {#dep-%s}\n\n", n3, d_j$nom_dep, d_j$code_dep))
+    # Une carte du département par indicateur
+    gs <- lapply(R$indics, function(ind) {
+      mv <- R$D[[ind]]$mv |> filter(code_reg == !!code_reg)
+      carte_departement(mv, d_j, paste(d_j$nom_dep, "—", ind), R$sous_titre(ind),
+                        rendu = R$rendu, fond = R$fonds[[ind]], assembler = length(R$indics) == 1)
+    })
+    # Deux indicateurs : cartes côte à côte avec une légende commune; sinon la carte seule
+    if (length(gs) == 2) {
+      print(cartes_cote_a_cote(gs[[1]], gs[[2]], etiquettes = R$indics,
+                               titre = paste(d_j$nom_dep, "—", R$fenetre),
+                               sous_titre = sprintf("Indices sur %d mois (référence 1991-2020) — %s",
+                                                    R$echelle, libelle_rendu[R$rendu])))
+    } else print(gs[[1]])
+    cat("\n\n")
+    
+        # Répartition des mailles du département par classe, pour chaque indicateur
+    for (ind in R$indics) {
+      mv_dep <- R$D[[ind]]$mv |> filter(code_dep == d_j$code_dep)
+      html_brut(ligne_parts(mv_dep, d_j$nom_dep, ind))
+    }
+    
+    # Courbe d'évolution depuis janvier : séries des indicateurs empilées dans une seule table
+    sd <- bind_rows(lapply(R$indics, function(ind) R$D[[ind]]$series_dep |> filter(code_dep == d_j$code_dep)))
+    print(serie_entite(sd, paste(d_j$nom_dep, "— évolution", R$annee),
+                       sprintf("Indices sur %d mois, moyenne des %d mailles", R$echelle, sd$n_mailles[1])))
+    cat("\n\n")
+    note_evolution(R)   # note de lecture dépliable, sous la courbe (dans l'onglet du département)
+  }
+  cat(":::\n\n")
+  # Lien « retour au sommaire » en fin de section
+  html_brut('<p class="retour"><a href="#sommaire">↑ Retour au sommaire</a></p>')
+}
+
+# Frise « Échelles » d'une région : pour chaque indicateur, les cartes régionales à
+# toutes les échelles disponibles (1, 3, 6, 12 mois) côte à côte, en mailles brutes,
+# avec une seule barre de légende; puis un petit tableau des moyennes régionales par
+# échelle. Lire les échelles ensemble permet de dater la sécheresse : un indice bas sur
+# 3 mois mais normal sur 12 signale un déficit récent; l'inverse, un déficit ancien.
+emettre_echelles <- function(R, code_reg, r, dr) {
+  cat("### Toutes les échelles {.unnumbered .unlisted}\n\n")
+  cat(sprintf("Situation à fin %s selon la durée sur laquelle l'indice est calculé (mailles de 8 km).\n\n", R$mois_lib))
+  cat("::: {.panel-tabset}\n\n")
+  for (ind in R$indics) {
+    cat(sprintf("#### %s\n\n", ind))
+    e <- R$E[[ind]] |> filter(code_reg == !!code_reg)
+    # Une carte par échelle (sans légende ni titre, la barre est commune)
+    gs <- lapply(R$echelles_dispo, function(k) {
+      couche <- suppressWarnings(st_intersection(e |> filter(echelle == k) |> select(valeur, classe), r |> select()))
+      ggplot() +
+        geom_sf(data = couche, aes(fill = classe), colour = NA) +
+        geom_sf(data = dr, fill = NA, colour = "grey15", linewidth = 0.3) +
+        geom_sf(data = r, fill = NA, colour = "black", linewidth = 0.6) +
+        echelle_mf() + coord_sf(datum = NA) +
+        labs(title = sprintf("%d mois", k), subtitle = fenetre_mois(R$mois_sel, k)) +
+        theme_carte() +
+        theme(plot.title = element_text(hjust = 0.5, size = 12), plot.subtitle = element_text(hjust = 0.5, size = 9, colour = "grey30"))
+    })
+    fig <- (patchwork::wrap_plots(gs, nrow = 1) / legende_barre()) +
+      patchwork::plot_layout(heights = c(1, 0.32)) +
+      patchwork::plot_annotation(title = sprintf("%s — %s selon l'échelle de temps", r$nom_reg, ind), caption = source_txt,
+                                 theme = theme(plot.title = element_text(size = 15, face = "plain"),
+                                               plot.caption = element_text(margin = margin(t = 10), size = 8.5, colour = "grey40")))
+    print(fig)
+    cat("\n\n")
+    # Moyenne régionale par échelle, avec sa classe
+    tab <- e |> st_drop_geometry() |> group_by(echelle) |>
+      summarise(valeur = mean(valeur), .groups = "drop") |> arrange(echelle) |>
+      transmute(Échelle = paste(echelle, "mois"), Période = vapply(echelle, function(k) fenetre_mois(R$mois_sel, k), ""),
+                !!paste(ind, "moyen") := sprintf("%.2f", valeur), Classe = badge(classer(valeur), valeur))
+    html_brut(as.character(knitr::kable(tab, format = "html", escape = FALSE, align = c("l", "l", "r", "l"),
+                                        table.attr = 'class="table table-sm w-auto"')))
+  }
+  cat(":::\n\n")
+  cat('::: {.callout-tip collapse="true" title="Note de lecture — les échelles"}
+Le même indice est calculé par Météo-France sur des durées différentes : 1, 3, 6 et 12 mois. Chaque carte compare la période indiquée à la même période des années 1991-2020. Lire les échelles ensemble permet de dater la sécheresse : répondre à « depuis quand ? ».
+
+**SSWI (humidité des sols).** Chaque échelle est la moyenne de l\'humidité du sol sur 1, 3, 6 ou 12 mois. SSWI-1 ou SSWI-3 bas, SSWI-12 proche de la normale : les sols se sont asséchés récemment, après un hiver et un printemps corrects — situation type d\'une sécheresse d\'été après une bonne recharge hivernale. SSWI-12 bas, SSWI-3 revenu vers la normale : les sols ont été secs une bonne partie de l\'année, mais les derniers mois les ont réhumidifiés — reprise en cours. Bas à toutes les échelles : sols secs depuis longtemps, sans reprise. Les contrastes entre échelles sont toutefois atténués, parce que le sol garde la mémoire des mois précédents : même sur 1 mois, l\'indice reflète une situation construite sur plusieurs mois.
+
+**SPI (précipitations).** Chaque échelle est le cumul de pluie sur 1, 3, 6 ou 12 mois. Sur 1 ou 3 mois, c\'est la pluie récente, celle qui compte pour les cultures en place. Sur 6 ou 12 mois, c\'est la pluie accumulée sur une longue période : un déficit qui s\'y lit s\'est construit sur plusieurs saisons et ne se comble pas en quelques semaines. SPI bas sur 3 mois mais normal sur 12 : le déficit est récent. SPI bas sur 12 mois mais revenu à la normale sur 3 : le déficit est ancien et se résorbe. SPI bas partout : la sécheresse dure.
+
+Ces cartes sont dessinées directement à partir des mailles SIM2 de 8 km, afin que les quatre échelles soient représentées de la même manière.
+:::\n\n')
+}
+
+# Lecture croisée SSWI x SPI d'une région : chaque maille est classée selon que ses
+# sols sont secs (SSWI < seuil) et/ou que sa pluie est déficitaire (SPI < seuil),
+# soit quatre situations. Carte en mailles brutes + tableau des parts par département.
+# Le seuil est celui de la classe « plus sec que la normale » (durée de retour 5 ans).
+# Ne fait rien si un seul indicateur est demandé.
+situations_croisees <- c("Sols secs et pluie déficitaire", "Sols secs, pluie proche de la normale",
+                         "Pluie déficitaire, sols proches de la normale", "Ni l'un ni l'autre")
+couleurs_croisees   <- setNames(c("#E8794A", "#F7D08A", "#9ED9CF", "#F2F2F2"), situations_croisees)
+
+emettre_croisee <- function(R, code_reg, r, dr) {
+  if (!all(c("SSWI", "SPI") %in% R$indics)) return(invisible())
+  seuil <- legende_mf$breaks[4]   # -0,84 : entrée dans « plus sec que la normale »
+
+  # Une ligne par maille de la région, avec ses deux indices
+  a <- R$D$SSWI$mv |> filter(code_reg == !!code_reg) |> select(LAMBX, LAMBY, code_dep, nom_dep, sswi = valeur)
+  b <- R$D$SPI$mv  |> st_drop_geometry() |> select(LAMBX, LAMBY, spi = valeur)
+  m <- a |> inner_join(b, by = c("LAMBX", "LAMBY")) |>
+    mutate(situation = factor(case_when(
+      sswi < seuil & spi < seuil ~ situations_croisees[1],
+      sswi < seuil               ~ situations_croisees[2],
+      spi  < seuil               ~ situations_croisees[3],
+      TRUE                       ~ situations_croisees[4]), levels = situations_croisees))
+  if (nrow(m) == 0) return(invisible())
+
+  cat("### Lecture croisée sols × pluie {.unnumbered .unlisted}\n\n")
+  cat(sprintf("Où le déficit de pluie se traduit-il dans les sols ? Chaque maille est classée selon son SSWI et son SPI sur %d mois (%s), avec le seuil « plus sec que la normale » (%.2f).\n\n",
+              R$echelle, R$fenetre, seuil))
+
+  couche <- suppressWarnings(st_intersection(m |> select(situation), r |> select()))
+  g <- ggplot() +
+    geom_sf(data = couche, aes(fill = situation), colour = NA) +
+    geom_sf(data = dr, fill = NA, colour = "grey15", linewidth = 0.4) +
+    geom_sf(data = r, fill = NA, colour = "black", linewidth = 0.7) +
+    scale_fill_manual(values = couleurs_croisees, drop = FALSE, name = NULL) +
+    guides(fill = guide_legend(nrow = 2)) +
+    coord_sf(datum = NA) +
+    labs(title = paste(r$nom_reg, "— sols et pluie,", R$fenetre),
+         subtitle = sprintf("SSWI et SPI sur %d mois, seuil %.2f (durée de retour 5 ans) — mailles 8 km", R$echelle, seuil),
+         caption = source_txt) +
+    theme_carte() + theme(legend.text = element_text(size = 10))
+  print(g)
+  cat("\n\n")
+
+  # Parts par département (en % des mailles), départements du plus touché au moins touché
+  parts <- m |> st_drop_geometry() |>
+    count(code_dep, nom_dep, situation, .drop = FALSE) |>
+    group_by(code_dep, nom_dep) |> mutate(n_mailles = sum(n), part = round(100 * n / n_mailles)) |> ungroup() |>
+    select(-n) |>
+    tidyr::pivot_wider(names_from = situation, values_from = part, values_fill = 0) |>
+    arrange(desc(.data[[situations_croisees[1]]])) |>
+    transmute(Département = nom_dep, Mailles = n_mailles,
+              across(all_of(situations_croisees), ~ .x, .names = "% {.col}"))
+  html_brut(as.character(knitr::kable(parts, format = "html", align = c("l", rep("r", 5)),
+                                      table.attr = 'class="table table-sm"')))
+
+  cat('::: {.callout-tip collapse="true" title="Note de lecture — la lecture croisée"}
+Cette carte combine les deux indices pour répondre à une question simple : le manque de pluie se voit-il déjà dans les sols ?
+
+- **Sols secs et pluie déficitaire** (orange) : sécheresse cohérente, le déficit de pluie s\'est répercuté dans le sol.
+- **Sols secs, pluie proche de la normale** (jaune) : les sols sont secs pour une autre raison que la pluie de la période : forte évaporation liée à la chaleur, ou héritage d\'un printemps sec. À vérifier avec le bilan hydrique (ETP, température) et les échelles longues.
+- **Pluie déficitaire, sols proches de la normale** (turquoise) : la pluie a manqué, mais le sol n\'en porte pas encore la marque, soit parce qu\'il était bien rechargé au départ, soit parce qu\'il est d\'ordinaire déjà sec à cette saison et ne peut guère l\'être davantage (le SSWI mesure une rareté, pas une quantité).
+- **Ni l\'un ni l\'autre** (gris clair) : situation proche de la normale sur les deux indices.
+
+Le seuil retenu est celui de la classe « plus sec que la normale » des cartes : un déficit qui revient en moyenne une année sur cinq. Le tableau donne la part des mailles de chaque département dans chaque situation, les départements sont classés selon la part de mailles touchées sur les deux indices.
+:::\n\n')
+}
+
+# Persistance de la sécheresse dans une région : carte du nombre de mois consécutifs
+# (jusqu'au mois cartographié) où l'indice est sous le seuil « plus sec que la normale »,
+# et tableau par département. Distingue un épisode ponctuel d'une situation installée.
+classes_persist <- c("0 : pas en situation sèche ce mois-ci", "1 mois", "2 mois", "3 à 4 mois", "5 à 6 mois", "7 mois et plus")
+couleurs_persist <- setNames(c("#F2F2F2", "#FFF3B0", "#FFD200", "#FFA000", "#FF3C00", "#8C1A00"), classes_persist)
+classer_persist <- function(n) cut(n, breaks = c(-Inf, 0, 1, 2, 4, 6, Inf), labels = classes_persist)
+
+emettre_persistance <- function(R, code_reg, r, dr) {
+  cat("### Persistance de la sécheresse {.unnumbered .unlisted}\n\n")
+  cat(sprintf("Depuis combien de mois consécutifs chaque maille est-elle dans une classe sèche de la légende (indice sur %d mois sous %.2f, seuil « plus sec que la normale »), en remontant depuis %s ? Pour le SSWI, il s'agit de sols secs, pour le SPI, d'une pluie déficitaire.\n\n",
+              R$echelle, R$seuil_sec, R$mois_lib))
+  cat("::: {.panel-tabset}\n\n")
+  for (ind in R$indics) {
+    cat(sprintf("#### %s\n\n", ind))
+    pm <- R$P[[ind]] |> filter(code_reg == !!code_reg) |> mutate(classe = classer_persist(n_mois))
+    couche <- suppressWarnings(st_intersection(pm |> select(n_mois, classe, depuis_debut), r |> select()))
+    g <- ggplot() +
+      geom_sf(data = couche, aes(fill = classe), colour = NA) +
+      # Hachure légère : mailles sèches depuis le début des données (janvier)
+      geom_sf(data = couche |> filter(depuis_debut & n_mois > 0), fill = NA, colour = "grey20", linewidth = 0.15, linetype = "dotted") +
+      geom_sf(data = dr, fill = NA, colour = "grey15", linewidth = 0.4) +
+      geom_sf(data = r, fill = NA, colour = "black", linewidth = 0.7) +
+      scale_fill_manual(values = couleurs_persist, drop = FALSE, name = NULL) +
+      guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+      coord_sf(datum = NA) +
+      labs(title = paste(r$nom_reg, "—", ind, ": persistance à fin", R$mois_lib),
+           subtitle = sprintf("Mois consécutifs avec %s sur %d mois < %.2f — pointillés : %s depuis janvier %d (début des données)",
+                              ind, R$echelle, R$seuil_sec, lib_sec(ind, "etat"), R$annee),
+           caption = source_txt) +
+      theme_carte()
+    print(g)
+    cat("\n\n")
+    # Tableau par département : durée moyenne, part des mailles sèches depuis 3 mois ou plus, maximum
+    tab <- pm |> st_drop_geometry() |> group_by(Département = nom_dep) |>
+      summarise(Mailles = n(),
+                `Durée moyenne (mois)` = sprintf("%.1f", mean(n_mois)),
+                !!paste("%", lib_sec(ind, "part"), "ce mois-ci") := round(100 * mean(n_mois >= 1)),
+                !!paste("%", lib_sec(ind, "part"), "depuis 3 mois ou plus") := round(100 * mean(n_mois >= 3)),
+                !!paste("%", lib_sec(ind, "part"), "depuis janvier") := round(100 * mean(depuis_debut & n_mois > 0)),
+                `Durée max (mois)` = max(n_mois), .groups = "drop") |>
+      arrange(desc(.data[[paste("%", lib_sec(ind, "part"), "depuis 3 mois ou plus")]]))
+    html_brut(as.character(knitr::kable(tab, format = "html", align = c("l", rep("r", 6)),
+                                        table.attr = 'class="table table-sm"')))
+  }
+  cat(":::\n\n")
+  cat(sprintf('::: {.callout-tip collapse="true" title="Note de lecture — la persistance"}
+Pour chaque maille, on remonte le temps depuis %s et on compte les mois d\'affilée où l\'indice est resté sous le seuil « plus sec que la normale » (%.2f, durée de retour 5 ans). Le compte s\'arrête au premier mois où l\'indice repasse au-dessus. Une maille à **0** n\'est pas en situation sèche ce mois-ci, quel que soit son passé : une maille sèche de mars à juillet mais revenue au-dessus du seuil en août est à 0.
+
+**Ce que ça distingue.** Une maille à 1 ou 2 mois vient d\'entrer en sécheresse : l\'épisode est récent, une reprise des pluies peut le clore vite. Une maille à 5 mois ou plus est dans une situation installée et les échelles longues (6-12 mois) y sont probablement basses aussi. Le tableau donne, par département, la part des mailles en situation sèche depuis au moins trois mois : c\'est un bon résumé de l\'ancrage de la sécheresse.
+
+**SSWI et SPI ne persistent pas de la même façon.** Le sol a de la mémoire : une fois sec, il le reste tant que les pluies n\'ont pas reconstitué la réserve, ce qui en été demande des cumuls importants. De longues séries de mois en classe sèche sont donc normales pour le SSWI et la carte SSWI montre surtout depuis quand la réserve est entamée. La pluie n\'a pas de mémoire : le SPI peut repasser au-dessus du seuil dès qu\'un mois arrosé entre dans la fenêtre et retomber ensuite. Une longue persistance du SPI signale un manque de pluie ininterrompu, plus rare et plus significatif. Lire les deux cartes ensemble : SSWI persistant mais SPI à 0 ou 1 mois, la pluie est revenue mais le sol n\'a pas encore suivi, SPI persistant et SSWI plus court, le sol a résisté un temps (réserve initiale) avant de décrocher.
+
+**Deux limites.** Les données du rapport commencent en janvier %d : une maille en pointillés est sèche sur tous les mois disponibles et l\'épisode a pu commencer avant (le compte est alors un minimum). Et comme l\'indice porte sur %d mois glissants, deux mois consécutifs partagent une partie de leur période : la persistance se lit en mois calendaires, pas en mois « indépendants ».
+:::\n\n', R$mois_lib, R$seuil_sec, R$annee, R$echelle))
+}
+
+# Notes de lecture : encadrés repliés (le lecteur clique pour les ouvrir), chacun
+# émis JUSTE SOUS l'élément qu'il explique :
+#   note_cartes()    : sous les cartes de France et sous les cartes de chaque région
+#   note_bilan()     : sous le tableau de bilan hydrique
+#   note_detail()    : sous le tableau « Détail par département » (dans son encadré replié)
+#   note_evolution() : sous la courbe d'évolution, dans l'onglet de chaque département
+# Le texte de chaque note est une chaîne passée à sprintf(); les %d et %s sont remplacés,
+# dans l'ordre, par les valeurs listées à la fin (échelle, période). Dans ce texte,
+# écrire %% pour obtenir % et \' pour une apostrophe.
+# Note du tableau « Détail par département ». Ce tableau est déjà dans un encadré replié :
+# pour éviter un encadré dans un encadré, la note utilise la balise HTML <details>,
+# qui se déplie au clic de la même façon. Le texte est donc écrit en HTML (<strong>, <li>…).
+note_detail <- function(ind) {
+  html_brut(sprintf('
+<details class="small text-secondary mt-2">
+<summary><strong>Note de lecture — le tableau</strong></summary>
+<p class="mt-2">Une ligne par département, <strong>%s</strong>, pour le mois cartographié.</p>
+<ul>
+<li><strong>%s moyen</strong> : moyenne des valeurs de toutes les mailles de 8 km du département. Plus la valeur est négative, plus la situation est sèche (%s), 0 correspond à la normale 1991-2020.</li>
+<li><strong>Classe</strong> : classe de la légende dans laquelle tombe <em>cette moyenne</em> (seuils : −0,84 pour « plus sec que la normale », −1,28 pour « inhabituellement sec », −1,75 pour « exceptionnellement sec », soit des durées de retour de 5, 10 et 25 ans). La mention <em>(à la limite)</em> signale une moyenne à moins de 0,05 d\'un seuil : le département aurait pu basculer dans la classe voisine, l\'écart avec un département classé juste à côté n\'est pas significatif.</li>
+<li><strong>Mailles</strong> : nombre de mailles rattachées au département, sur lesquelles portent la moyenne et les pourcentages. Chaque maille est rattachée à un seul département, celui de son centre (ou le plus proche pour une maille à cheval sur le littoral ou une frontière). Les mailles du modèle situées entièrement à l\'étranger ne sont pas comptées.</li>
+<li><strong>%% par classe</strong> : répartition des mailles du département entre les classes (le total fait 100 %%, aux arrondis près). Seules les classes présentes dans la région sont affichées.</li>
+</ul>
+<p><strong>Moyenne et répartition se complètent.</strong> La classe résume le département en un mot, les pourcentages montrent si la situation est homogène. Un département peut ainsi être classé « exceptionnellement sec » alors que la majorité de ses mailles sont « inhabituellement sèches » : une minorité de mailles très sèches suffit à tirer la moyenne sous le seuil. À l\'inverse, deux départements de même classe peuvent cacher des répartitions très différentes.</p>
+</details>
+', lib_sec(ind, "classement"), ind, lib_sec(ind, "etat")))
+}
+
+# texte_rendu() : paragraphe expliquant COMMENT la carte est dessinée, selon le rendu.
+# Écrit entre guillemets doubles : les apostrophes et les % s'écrivent ici normalement
+# (ce texte est inséré dans la note par un %s, il n'est pas lui-même un texte à trous).
+texte_rendu <- function(rendu, interpolation = "bilineaire", resolution_m = 1000) {
+  # Libellé lisible de la résolution choisie : 1000 -> "1 km", 500 -> "500 m", etc.
+  resolution_txt <- if (resolution_m >= 1000 && resolution_m %% 1000 == 0) {
+    paste0(resolution_m / 1000, " km")
+  } else {
+    paste0(resolution_m, " m")
+  }
+
+  switch(rendu,
+    interpole = {
+      if (interpolation == "proche") {
+        paste0(
+          "**Comment ces cartes sont dessinées.** Les données d'origine sont des carrés de 8 km, avec une seule valeur par carré. ",
+          "La grille de ", resolution_txt, " est obtenue par la méthode du plus proche voisin : chaque cellule reprend la valeur de la maille de 8 km la plus proche. ",
+          "La résolution réelle de l'information reste donc 8 km."
+        )
+      } else {
+        methode <- if (interpolation == "cubique") "cubique" else "bilinéaire"
+        paste0(
+          "**Comment ces cartes sont dessinées (rendu interpolé).** Les données d'origine sont des carrés de 8 km, avec une seule valeur par carré. ",
+          "Une interpolation ", methode, " estime des valeurs intermédiaires sur une grille de ", resolution_txt, " afin d'obtenir des transitions progressives entre les mailles. ",
+          "Cette interpolation est une opération de représentation cartographique réalisée dans ce rapport; elle ne constitue pas une donnée Météo-France à ", resolution_txt, ". ",
+          "La grille à ", resolution_txt, " sert uniquement à l'affichage et ne change pas la résolution réelle des données, qui reste de 8 km."
+        )
+      }
+    },
+    communes = paste0(
+      "**Comment ces cartes sont dessinées (rendu communal).** Chaque commune prend la couleur de la maille SIM2 de 8 km la plus proche de son centre. ",
+      "Les limites communales donnent une impression de détail, mais la précision réelle reste celle des mailles : les communes situées dans une même maille ont nécessairement la même valeur. ",
+      "Les chiffres des tableaux et des courbes sont calculés sur les mailles, pas sur les communes."),
+    paste0(
+      "**Comment ces cartes sont dessinées.** Les mailles de 8 km du modèle sont dessinées telles quelles, une couleur par carré et découpées au contour du territoire."))
+}
+
+# `rendu` : rendu des cartes que la note accompagne (les cartes de France sont toujours
+# dessinées en mailles brutes, quel que soit le rendu choisi pour les régions)
+note_cartes <- function(R, rendu = R$rendu) {
+  cat(sprintf('
+::: {.callout-note collapse="true" title="Note de lecture — les cartes"}
+Le **SSWI** (*Standardized Soil Wetness Index*) compare l\'humidité des sols moyenne des %d derniers mois (ici %s) à celle observée à la même période sur la référence 1991-2020, sur chaque maille de 8 km du modèle SIM2 de Météo-France. Le **SPI** (*Standardized Precipitation Index*) fait de même avec le cumul de précipitations : il ne dépend que des pluies, sans tenir compte de l\'évaporation ni de la réserve des sols. Lus ensemble, un SPI bas et un SSWI bas signalent une sécheresse installée et un SPI revenu à la normale avec un SSWI encore bas, une reprise des pluies qui n\'a pas encore rechargé les sols.
+
+Les classes suivent la légende Météo-France, par durée de retour : « plus sec que la normale » au-delà de 5 ans (une année sur cinq), « inhabituellement sec » au-delà de 10 ans, « exceptionnellement sec » au-delà de 25 ans. Les valeurs sont celles diffusées par Météo-France (jeu « SIM mensuelle », meteo.data.gouv.fr), sans recalcul.
+
+**Un mot sur le vocabulaire.** « Sec » est le terme de la légende Météo-France, commun aux deux indices : il qualifie une *situation* rare par rapport à la normale. Pour le SSWI, une classe sèche signifie des **sols secs** et pour le SPI, une **période déficitaire en pluie**. Dans le rapport, « situation sèche » ou « classe sèche » renvoie à cette légende quel que soit l\'indice. Les textes propres à un onglet précisent de quoi il s\'agit.
+
+%s
+
+**Pour aller plus loin** — le principe de construction, de standardisation et d\'interprétation du SSWI est présenté dans la documentation du portail DRIAS-Eau [@drias_sswi].
+Présentation générale du modèle de surface [@meteofrance_modele_sim2].
+:::
+
+', R$echelle, R$fenetre, texte_rendu(rendu, R$interpolation, R$resolution_m)))
+}
+
+note_bilan <- function(R) {
+  cat(sprintf('
+::: {.callout-tip collapse="true" title="Note de lecture — le bilan hydrique"}
+Le tableau de bilan hydrique donne, pour chaque département, les grandeurs physiques qui expliquent les indices, sur la même période (%s). Cumuls et moyennes portent sur les mailles de 8 km du département, les chiffres entre parenthèses situent chaque valeur par rapport à la normale 1991-2020 de la même période.
+
+**Comment sont construites les normales ?** Pour chaque maille de 8 km et chaque mois calendaire, la normale est la simple moyenne des 30 valeurs observées de 1991 à 2020 (les 30 mois de juillet pour la normale de juillet, par exemple). Les normales suivent ensuite le même chemin que les valeurs du tableau : on additionne les mois de la période pour les cumuls (pluie, ETP, évaporation, pluies efficaces), on en fait la moyenne pour le SWI et la température, puis on moyenne sur les mailles du département. On compare donc toujours une période à la même période des années de référence. La période 1991-2020 est la référence climatologique en vigueur et c\'est aussi celle des indices SSWI et SPI de Météo-France. [@fiche_climatologie]
+
+**Les chiffres entre parenthèses** n\'ont pas la même nature selon la colonne :
+
+- *Pluie, ETP, évaporation réelle* : la valeur en **%% de la normale**. 100 %% = conforme à la normale, en dessous déficit, au-dessus excédent. Exemple : « 104 (52 %%) » = 104 mm, soit à peine plus de la moitié de la pluie habituelle.
+- *Pluies efficaces* : la **différence en millimètres** avec la normale. Le pourcentage n\'est pas utilisé car les pluies efficaces peuvent être nulles ou négatives, ce qui le rendrait trompeur. Exemple : « -55 (-32) » = 32 mm de moins que la normale, elle-même déjà négative (-23 mm).
+- *SWI moyen* : **la valeur normale elle-même** et non un écart. Exemple : « 0.22 (norm. 0.39) » = des sols nettement plus secs qu\'habituellement à cette période.
+- *T moyenne* : la **différence en degrés** avec la normale. Exemple : « 21.0 (+3.1) » = 3,1 °C de plus que la normale.
+
+**Pluie (mm)** — cumul de précipitations, solides et liquides. L\'écart est exprimé en pourcentage de la normale : 60 %% signifie qu\'il est tombé un peu plus de la moitié de ce qui tombe habituellement sur cette période.
+
+**ETP (mm)** — évapotranspiration *potentielle* : la quantité d\'eau que l\'atmosphère aurait pu faire évaporer si l\'eau était disponible sans limite. Elle dépend de la température, du rayonnement, du vent et de l\'humidité de l\'air. Un écart de 130 %% traduit une demande évaporative très supérieure à l\'habitude, généralement liée à la chaleur.
+
+**Évaporation réelle (mm)** — ce qui s\'est *effectivement* évaporé, borné par l\'eau disponible dans le sol. Quand elle décroche nettement sous l\'ETP, c\'est que le sol ne peut plus fournir : la végétation limite sa transpiration.
+
+**Pluies efficaces (mm)** — pluie moins évaporation réelle : ce qui reste pour humidifier le sol et recharger les nappes. Négatives, elles indiquent que le sol a puisé dans sa réserve. L\'écart est donné en millimètres.
+
+**SWI moyen** — indice d\'humidité des sols, moyenne de la période : 0 = point de flétrissement, 1 = capacité au champ (réserve pleine). La valeur peut dépasser 1 en cas de saturation. La normale de la période est rappelée. le SSWI des cartes est la version standardisée de cet indice.
+
+**T moyenne (°C)** — température moyenne de la période, avec l\'écart à la normale en degrés.
+
+Une lecture d\'ensemble : peu de pluie et forte ETP donnent des pluies efficaces négatives, l\'évaporation réelle bridée et le SWI bas confirment que la réserve est entamée. Le SPI résume la première colonne, le SSWI l\'avant-dernière.
+
+**Pour aller plus loin** — la définition officielle de chaque variable des fichiers SIM2 (nom de colonne, unité, mode de calcul) figure dans la documentation Météo-France du jeu de données [@meteofrance_sim2].
+:::
+
+', R$fenetre))
+}
+
+note_evolution <- function(R) {
+  cat(sprintf('
+::: {.callout-tip collapse="true" title="Note de lecture — les courbes d\'évolution"}
+Chaque onglet départemental se termine par la trajectoire des deux indices depuis janvier. Chaque point est la moyenne des mailles du département pour le mois indiqué, comme les indices portent sur %d mois, le point du dernier mois résume %s, celui du mois précédent la fenêtre décalée d\'un mois et ainsi de suite. Deux points consécutifs partagent donc une partie de leur période.
+
+**Le fond coloré** reprend la légende des cartes : bande centrale « autour de la normale », puis jaune, orange et rouge aux seuils de durée de retour 5, 10 et 25 ans côté sec, verts côté humide.
+
+**Le trait noir continu** est le SSWI (humidité des sols), **les tirets bleus** le SPI (précipitations). Leur écart est l\'information la plus utile : le SPI réagit vite aux pluies, le SSWI intègre aussi l\'évaporation et la réserve du sol. Un SPI qui remonte alors que le SSWI reste bas signale des pluies qui n\'ont pas encore rechargé les sols, un SSWI qui décroche sous le SPI, une demande évaporative qui vide le sol plus vite que le déficit de pluie ne le laisse penser.
+
+Les valeurs des deux derniers mois sont susceptibles d\'être révisées par Météo-France.
+:::
+
+', R$echelle, R$fenetre))
+}
+```
+
+```{r}
+#| label: preparation
+# Tous les calculs, à partir des paramètres du document (voir l'en-tête YAML)
+R <- preparer(annee = params$annee, indicateurs = params$indicateurs, echelle = params$echelle,
+              mois = params$mois, regions_choix = params$regions, rendu = params$rendu,
+              interpolation = params$interpolation, resolution_m = params$resolution_m,
+              dossier = "data")
+```
+
+```{r}
+#| label: entete
+#| results: asis
+emettre_entete(R, logo = params$logo)
+```
+
+## Situation d'ensemble — France hors DROM {.unnumbered}
+
+Chiffres clés à l'échelle nationale : moyenne de toutes les mailles de la France hors DROM, part des mailles en situation sèche et région la plus touchée. Les sections régionales viennent ensuite.
+
+```{r}
+#| label: bandeau
+#| results: asis
+emettre_bandeau(R)
+```
+
+### Cartes de France {.unnumbered .unlisted}
+
+```{r}
+#| label: france
+#| results: asis
+#| fig-width: 10
+#| fig-height: 9.5
+emettre_france(R)
+```
+
+### Régions du rapport {.unnumbered .unlisted}
+
+`r if (nrow(R$regions) < nrow(R$regions_fr)) sprintf("*Rapport limité à %d région(s) sur %d : cliquer sur une région ou un département pour accéder à sa section.*", nrow(R$regions), nrow(R$regions_fr)) else "*Cliquer sur une région ou un département pour accéder à sa section.*"`
+
+```{r}
+#| label: sommaire
+#| results: asis
+emettre_sommaire(R)
+```
+
+```{r}
+#| label: regions
+#| results: asis
+t0 <- Sys.time()
+for (code in R$regions$code_reg) {
+  t1 <- Sys.time()
+  emettre_region(R, code)
+  message(sprintf("%-6s %5.1f s", code, as.numeric(difftime(Sys.time(), t1, units = "secs"))))
+}
+message(sprintf("Total régions : %.0f s", as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+```
+
+## Références {.unnumbered}
+
+::: {#refs}
+:::

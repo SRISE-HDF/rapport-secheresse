@@ -1,0 +1,33 @@
+/*-- scss:defaults --*/
+$font-family-sans-serif: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+$body-color: #2b2b2b;
+$link-color: #1d5fa5;
+$headings-font-weight: 600;
+$grid-body-width: 1100px;
+$grid-sidebar-width: 280px;
+
+/*-- scss:rules --*/
+// --- En-tête (bandeau bleu foncé) : sous-titre et métadonnées en clair ---
+.quarto-title-block .title { font-size: 2rem; letter-spacing: -.01em; }
+.quarto-title-banner .subtitle,
+.quarto-title-banner .quarto-title-meta,
+.quarto-title-banner .quarto-title-meta-heading,
+.quarto-title-banner .quarto-title-meta-contents,
+.quarto-title-banner .quarto-title-meta-contents a { color: rgba(255, 255, 255, .88) !important; }
+.quarto-title-banner .subtitle { font-size: 1.15rem; margin-top: .3rem; }
+
+// --- Sections région ---
+h2 { margin-top: 3rem; padding-top: 1rem; border-top: 2px solid #eee; }
+.retour { font-size: .85rem; margin-top: 1rem; }
+
+// --- Tableaux ---
+table.table { font-size: .9rem; }
+table.table th { background: #f6f7f9; font-weight: 600; }
+table.table td, table.table th { padding: .4rem .6rem; }
+
+// --- Onglets ---
+.panel-tabset .nav-tabs .nav-link { font-size: .9rem; padding: .4rem .8rem; }
+.panel-tabset .nav-tabs .nav-link.active { font-weight: 600; }
+
+// --- Figures ---
+.figure img, .cell-output-display img { border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }

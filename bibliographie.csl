@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+  <style xmlns="http://purl.org/net/xbiblio/csl"
+  version="1.0"
+  class="in-text"
+  default-locale="fr-FR">
+    
+    <info>
+    <title>Bibliographie simple DRAAF</title>
+    <id>http://www.zotero.org/styles/bibliographie-simple-draaf</id>
+    <updated>2026-09-18T00:00:00+00:00</updated>
+    </info>
+    
+    <!-- Citation dans le texte -->
+    <citation>
+  <layout prefix="(" suffix=")" delimiter="; ">
+    <group delimiter=", ">
+      <names variable="author">
+        <name/>
+        <substitute>
+          <text variable="title"/>
+        </substitute>
+      </names>
+      <date variable="issued">
+        <date-part name="year"/>
+      </date>
+    </group>
+  </layout>
+</citation>
+    
+    <!-- Bibliographie -->
+    <bibliography>
+    <layout suffix=".">
+    <group delimiter=". ">
+    <names variable="author">
+    <name/>
+    </names>
+    
+    <text variable="title" font-style="italic"/>
+    
+    <group>
+    <text term="accessed" text-case="capitalize-first" suffix=" "/>
+    <date variable="accessed">
+    <date-part name="day" suffix=" "/>
+    <date-part name="month" form="long" suffix=" "/>
+    <date-part name="year"/>
+    </date>
+    </group>
+    
+    <text variable="URL"/>
+    </group>
+    </layout>
+    </bibliography>
+    
+    </style>

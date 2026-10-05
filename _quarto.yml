@@ -1,0 +1,5 @@
+project:
+  title: "SSWI France"
+  output-dir: html
+  render:
+    - index.qmd
