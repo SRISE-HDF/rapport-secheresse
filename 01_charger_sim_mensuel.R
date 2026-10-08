@@ -15,9 +15,16 @@
 #      efficaces, drainage, ruissellement), SWI, et SSWI / SPI sur 1 / 3 / 6 /
 #      12 mois (toutes les mailles du fichier, y compris hors de France : le
 #      tri est fait ensuite par rattacher(), dans fonctions_cartes.R) ;
-#   4. enregistre data/sim_mensuel_<annee>.rds pour le rapport Quarto.
+#   4. enregistre data/sim_mensuel_<annee>.rds pour le rapport Quarto ;
+#   5. [GitHub Actions] dépose le .rds sur le stockage S3 d'Onyxia (SSP Cloud).
 #
-# Dépendances : httr2, jsonlite, data.table, dplyr
+# Deux modes de fonctionnement :
+#   - en local (RStudio) : comportement d'origine, rien n'est envoyé sur S3 ;
+#   - sur GitHub Actions : la variable d'environnement S3_BUCKET est définie,
+#     le script compare la version du serveur à celle déjà déposée sur S3
+#     (fichier témoin maj_sim_<annee>.txt) et s'arrête si rien n'a changé.
+#
+# Dépendances : httr2, jsonlite, data.table, dplyr (+ aws.s3 pour le mode S3)
 # =============================================================================
 
 # Chargement des packages (sans les messages de démarrage)
@@ -30,7 +37,9 @@ suppressPackageStartupMessages({
 
 # --- Paramètres --------------------------------------------------------------
 
-annee <- 2026   # année à charger
+# Année à charger : variable d'environnement ANNEE si elle existe,
+# sinon l'année en cours (évite de modifier le script chaque 1er janvier)
+annee <- as.integer(Sys.getenv("ANNEE", format(Sys.Date(), "%Y")))
 
 # Dossier du script (si lancé depuis RStudio), sinon répertoire de travail
 racine <- tryCatch(dirname(rstudioapi::getSourceEditorContext()$path),
@@ -44,6 +53,19 @@ dir.create(dossier, showWarnings = FALSE)
 
 # Slug du jeu (accepté par l'API au même titre que l'identifiant)
 url_api <- "https://www.data.gouv.fr/api/1/datasets/donnees-changement-climatique-sim-mensuelle/"
+
+# --- Stockage S3 Onyxia (actif seulement si S3_BUCKET est défini) -------------
+
+s3_actif <- nzchar(Sys.getenv("S3_BUCKET"))
+if (s3_actif) {
+  bucket  <- Sys.getenv("S3_BUCKET")                 # sur SSP Cloud : votre identifiant
+  prefixe <- Sys.getenv("S3_PREFIX", "meteo/")        # « sous-dossier » dans le bucket
+  # region = "" est indispensable avec MinIO ; l'adresse vient de AWS_S3_ENDPOINT
+  s3_args <- list(bucket = bucket, region = "",
+                  base_url = Sys.getenv("AWS_S3_ENDPOINT", "minio.lab.sspcloud.fr"))
+  objet_maj <- paste0(prefixe, sprintf("maj_sim_%d.txt", annee))   # fichier témoin
+  message("Mode S3 : dépôt dans s3://", bucket, "/", prefixe)
+}
 
 # --- Ressources ----------------------------------------------------------------
 
@@ -76,6 +98,25 @@ if (nrow(cible) == 0) cible <- csv |> arrange(desc(last_modified)) |> slice(1)
 cible <- cible |> arrange(desc(last_modified)) |> slice(1)
 message("Ressource retenue : ", cible$title, " (modifiée le ", format(cible$last_modified, "%d/%m/%Y"), ")")
 
+# --- Mode S3 : arrêt anticipé si S3 a déjà la version du serveur --------------
+# Sur GitHub, le dossier data/ est vide à chaque lancement : la comparaison
+# des dates se fait donc avec le fichier témoin déposé sur S3.
+
+if (s3_actif && !is.na(cible$last_modified)) {
+  maj_s3 <- tryCatch({
+    if (do.call(aws.s3::object_exists, c(list(object = objet_maj), s3_args))) {
+      brut <- do.call(aws.s3::get_object, c(list(object = objet_maj), s3_args))
+      as.POSIXct(trimws(rawToChar(brut)), tz = "UTC")
+    } else NA
+  }, error = function(e) NA)
+  
+  if (!is.na(maj_s3) && maj_s3 >= cible$last_modified) {
+    message("S3 contient déjà la version du ", format(maj_s3, "%d/%m/%Y %H:%M"),
+            " UTC : rien à faire.")
+    quit(save = "no", status = 0)
+  }
+}
+
 # --- Téléchargement conditionnel ---------------------------------------------------
 
 # Chemin du fichier local
@@ -86,13 +127,13 @@ a_jour <- file.exists(fichier) && !is.na(cible$last_modified) &&
   file.mtime(fichier) >= cible$last_modified
 
 if (!a_jour) {
-  # Téléchargement avec barre de progression
   message("Téléchargement…")
-  request(cible$url) |>
+  req <- request(cible$url) |>
     req_user_agent("R/DRAAF-HdF SRISE") |>
-    req_retry(max_tries = 3) |>
-    req_progress() |>
-    req_perform(path = fichier)
+    req_retry(max_tries = 3)
+  # Barre de progression seulement en session interactive (évite d'encombrer les logs GitHub)
+  if (interactive()) req <- req_progress(req)
+  req_perform(req, path = fichier)
   # On donne au fichier local la date du serveur, pour la comparaison au prochain lancement
   Sys.setFileTime(fichier, cible$last_modified)
 } else message("Fichier local à jour, pas de téléchargement.")
@@ -137,6 +178,10 @@ setnames(sim, col_ind, sub("^(SSWI|SPI)([0-9]+).*$", "\\1_\\2", col_ind))
 sim[, mois := paste0(substr(DATE, 1, 4), "-", substr(DATE, 5, 6))]
 # On ne garde que l'année demandée, puis on supprime DATE
 sim <- sim[substr(DATE, 1, 4) == as.character(annee)][, DATE := NULL]
+
+# Garde-fou (utile en janvier, quand le fichier de l'année n'est pas encore publié)
+if (nrow(sim) == 0) stop("Aucune donnée pour ", annee, " dans « ", cible$title, " ».")
+
 # Coordonnées et mois placés en premières colonnes
 setcolorder(sim, c("LAMBX", "LAMBY", "mois"))
 
@@ -148,4 +193,20 @@ print(sim[, lapply(.SD, function(v) round(mean(v, na.rm = TRUE), 2)), by = mois,
           .SDcols = patterns("^SWI|^SSWI|^SPI")])
 
 # Enregistrement du résultat pour le rapport Quarto
-saveRDS(sim, file.path(dossier, sprintf("sim_mensuel_%d.rds", annee)))
+fichier_rds <- file.path(dossier, sprintf("sim_mensuel_%d.rds", annee))
+saveRDS(sim, fichier_rds)
+
+# --- Mode S3 : dépôt du résultat et du fichier témoin ---------------------------
+
+if (s3_actif) {
+  ok <- do.call(aws.s3::put_object,
+                c(list(file = fichier_rds, object = paste0(prefixe, basename(fichier_rds))), s3_args))
+  if (!isTRUE(ok)) stop("Échec de l'envoi de ", basename(fichier_rds), " sur S3.")
+  
+  # Fichier témoin : date de la version serveur traitée (relu au prochain lancement)
+  temoin <- tempfile(fileext = ".txt")
+  writeLines(format(cible$last_modified, "%Y-%m-%d %H:%M:%S", tz = "UTC"), temoin)
+  do.call(aws.s3::put_object, c(list(file = temoin, object = objet_maj), s3_args))
+  
+  message("Déposé sur S3 : ", bucket, "/", prefixe, basename(fichier_rds))
+}
