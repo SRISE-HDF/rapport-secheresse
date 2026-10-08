@@ -32,6 +32,7 @@ jobs:
             any::data.table
             any::dplyr
             any::aws.s3
+            any::R.utils
 
       - name: Lancer le script
         env:
