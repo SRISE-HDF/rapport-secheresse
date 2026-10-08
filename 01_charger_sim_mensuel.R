@@ -39,7 +39,9 @@ suppressPackageStartupMessages({
 
 # Année à charger : variable d'environnement ANNEE si elle existe,
 # sinon l'année en cours (évite de modifier le script chaque 1er janvier)
-annee <- as.integer(Sys.getenv("ANNEE", format(Sys.Date(), "%Y")))
+annee_env <- Sys.getenv("ANNEE")
+annee <- if (nzchar(annee_env)) as.integer(annee_env) else as.integer(format(Sys.Date(), "%Y"))
+if (is.na(annee)) stop("ANNEE invalide : « ", annee_env, " »")
 
 # Dossier du script (si lancé depuis RStudio), sinon répertoire de travail
 racine <- tryCatch(dirname(rstudioapi::getSourceEditorContext()$path),
